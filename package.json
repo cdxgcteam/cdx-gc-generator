@@ -1,0 +1,42 @@
+{
+  "name": "cdxgenerator",
+  "homepage": "https://github.com/splytech/cdx-gc-generator",
+  "main": "./cdxgc_gen_server.js",
+  "version": "0.0.1",
+  "private": true,
+  "description": "CDX Grey Cell Generator - Generates messages for execution. Each message is a specific task either an executable or a URL.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/splytech/cdx-gc-generator.git"
+  },
+  "engines": {
+      "node": "0.8 || 0.9 || 0.10 || 0.11"
+  },
+  "dependencies": {
+	"underscore": "1.5.x",
+	"async": "0.2.9",
+	"commander": "2.1.x",
+	"colors": "0.6.x",
+	"winston": "0.7.x",
+	"csv": "0.3.x",
+    
+	"amqplib": "0.1.x",
+    
+	"q": "0.9.7",
+	"when": "~2.1",
+	
+    "random-seed": "git+https://github.com/skratchdot/random-seed.git",
+	"well-rng": "1.0.x"
+  },
+  "scripts": {
+    "start": "node ./cdxgc_gen_server.js"
+  },
+  "keywords": [
+	  "",
+	  "CDX",
+	  "GreyCell",
+	  "GreyCell Generator"
+  ],
+  "author": "Derek Yap <zangzi@gmail.com>",
+  "license": "MIT"
+}
