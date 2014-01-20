@@ -16,7 +16,7 @@ var version = "0.0.1";
 var util = require('util');
 var fs = require('fs');
 var crypto = require('crypto');
-
+var os = require('os');
 // - Underscore
 var _ = require('underscore');
 
@@ -51,15 +51,16 @@ var cdxgc_gen_args = require("commander");
 // ----------------------------
 // GLOBALS:
 // ----------------------------
+var SOURCE_SYSTEM_NAME = "cdxgenerator";
 var AMQP_EXCHANGE = "topic_cdxtasks";
-var AMQP_BASE_PATH = "/opt/cdxrabbitmq";
+var AMQP_BASE_PATH = "/home/cdxgcserver/cdx_gc_certs2";
 var AMQP_OPTS = {
-  cert: fs.readFileSync(AMQP_BASE_PATH + '/core_server/cert.pem'),
-  key: fs.readFileSync(AMQP_BASE_PATH + '/core_server/key.pem'),
+  cert: fs.readFileSync(AMQP_BASE_PATH + '/generator/cert.pem'),
+  key: fs.readFileSync(AMQP_BASE_PATH + '/generator/key.pem'),
   // cert and key or
   // pfx: fs.readFileSync('../etc/client/keycert.p12'),
-  passphrase: 'kJppRZYkdm4Fc5xr',
-  ca: [fs.readFileSync(AMQP_BASE_PATH + '/cacert.pem')]
+  //passphrase: 'kJppRZYkdm4Fc5xr',
+  ca: [fs.readFileSync(AMQP_BASE_PATH + '/rmqca/cacert.pem')]
 };
 
 var POSSIBLE_LARGE_SEEDS = [
@@ -75,20 +76,25 @@ var POSSIBLE_LARGE_SEEDS = [
 ];
 var CHOOSEN_SEED = 0;
 var UNDERGRAD_SCHOOLS = ["all","navy", "marines", "army", "airforce"];
+var COMMANDS_AVAILABLE = ["execute_url","pause", "quit", "execute_app"];
 var GRAD_SCHOOLS = ["nps"];
 var MIN_TIME = 200; // in milliseconds
 var MAX_TIME = 300000; // 5 mins = 300000 milliseconds
 var TASK_GEN_CYCLE_TIME = 500; // in milliseconds
 var URL_PREFACE = "http://";
 var URL_LIST = [];
-var cycleTimer = null;
+var CYCLE_TIMER = null;
+var COUNTERS = {
+	execute_url_cnt: 0,
+	pause_cnt: 0,
+};
 // ----------------------------
 // Commander:
 // ----------------------------
 
 cdxgc_gen_args
 	.version(version)
-	.option('-a, --amqp <server name or IP>', 'AMQP Server', 'localhost')
+	.option('-a, --amqp <server name or IP>', 'AMQP Server', os.hostname())
 	.option('-i, --inputFile <file>', 'Input file of URL\'s available to send')
 	.option('-u, --urlPreface <format>', 'Add URL Preface', URL_PREFACE)
 	.option('-c, --csvFormat <format>', 'Specify CSV Header Format')
@@ -134,6 +140,7 @@ var start = function() {
 		process.exit(1); // May need to kick out.
 	}
 	
+	logger.info("AMQP Server: " + cdxgc_gen_args.amqp);
 	logger.debug("Input File Path: " + cdxgc_gen_args.inputFile);
 	logger.debug("URL Preface: " + cdxgc_gen_args.urlPreface);
 	logger.debug("CSV Format: " + cdxgc_gen_args.csvFormat);
@@ -154,11 +161,11 @@ var csvparse = function(inputFile) { // CSV Pars
 	var csvFormat = true;
 	if (_.isString(cdxgc_gen_args.urlPreface)) {
 		urlPreface = cdxgc_gen_args.urlPreface;
-		logger.debug("URL Preface: " + urlPreface);
+		logger.debug("csvparse :: URL Preface: " + urlPreface);
 	}
 	if (_.isString(cdxgc_gen_args.csvFormat)) {
 		csvFormat = cdxgc_gen_args.csvFormat.split(',');
-		logger.debug("CSV Header Format Specified: " + csvFormat);
+		logger.debug("csvparse :: CSV Header Format Specified: " + csvFormat);
 	}
 	
 	csvparser()
@@ -174,7 +181,7 @@ var csvparse = function(inputFile) { // CSV Pars
 			return row;
 		})
 		.to.array(function(data, count) {
-			logger.debug("Input Count: " + count);
+			logger.debug("csvparse :: Input Count: " + count);
 			deferred.resolve(data);
 		});
 		
@@ -184,10 +191,10 @@ var csvparse = function(inputFile) { // CSV Pars
 var getURLandWorkTime = function(inputList) {
 	
 	var URL_pick = mainrand(inputList.length);
-	logger.debug("URL Pick: " + URL_pick);
+	logger.debug("getURLandWorkTime :: URL Pick: " + URL_pick);
 	var currentTime = parseInt(mainrand(cdxgc_gen_args.maxTime));
 	if (currentTime < cdxgc_gen_args.minTime) {
-		logger.debug("Min Time Hit - Adding MIN_TIME (" + cdxgc_gen_args.minTime + ") to value ("+ currentTime +").");
+		logger.debug("getURLandWorkTime :: Min Time Hit - Adding MIN_TIME (" + cdxgc_gen_args.minTime + ") to value ("+ currentTime +").");
 		currentTime += parseInt(cdxgc_gen_args.minTime);
 	}
 	logger.debug("Time Pick: " + currentTime);
@@ -202,10 +209,11 @@ var getTaskID = function(workArray) {
 	var shasum = crypto.createHash('sha1');
 	shasum.update(currentDigest, 'utf8');
 	var hashout = shasum.digest('hex');
-	logger.debug("TaskID Input: " + currentDigest);
-	logger.debug("TaskID SHA1: " + hashout);
+	logger.debug("getTaskID :: TaskID CurDate: " + currentDate.toJSON());
+	logger.debug("getTaskID :: TaskID Input: " + currentDigest);
+	logger.debug("getTaskID :: TaskID SHA1: " + hashout);
 	
-	return hashout;
+	return new Array(currentDate.toJSON(), hashout);
 };
 
 var getRoutingKey = function (school, secondaryPath) {
@@ -219,9 +227,47 @@ var getRoutingKey = function (school, secondaryPath) {
 			out += "." + secondaryPath;
 		}
 	} else {
-		logger.warn("Invalid School Specified: "+school+" :: This shouldn't happen...");
+		logger.warn("getRoutingKey :: Invalid School Specified: "+school+" :: This shouldn't happen...");
 	}
 	return out;
+};
+
+var getTasking = function (urlListArray, commandStr) {
+	
+	var msgStr = null;
+	
+	var choosenCommand = _.indexOf(COMMANDS_AVAILABLE,commandStr);
+	if (choosenCommand == -1) {
+		logger.warn("Invalid Command Specified: "+commandStr+" :: This shouldn't happen...");
+		return msgStr;
+	}
+	
+	var URLandWorkTime = getURLandWorkTime(urlListArray);
+	logger.debug("getTasking :: URL,WorkTime: " + URLandWorkTime);
+
+	//Task ID:
+	var currentTaskIDInfo = getTaskID(URLandWorkTime);
+	logger.debug("getTasking :: Task Creation Date: " + currentTaskIDInfo[0]);
+	logger.debug("getTasking :: Task ID: " + currentTaskIDInfo[1]);
+
+	// Put message together:
+	var msg_to_send = {};
+	msg_to_send.srcSystem = SOURCE_SYSTEM_NAME;					//Source System Generator
+	msg_to_send.cmd = COMMANDS_AVAILABLE[choosenCommand];		//Choosen Command
+	msg_to_send.taskCreateDate = currentTaskIDInfo[0];			//Task Creation Date/Time
+	msg_to_send.taskid = currentTaskIDInfo[1];					//Task ID
+	msg_to_send.urlNum = urlListArray[URLandWorkTime[0]].Rank;	//URL Number/Rank
+	msg_to_send.url = urlListArray[URLandWorkTime[0]].URL;		//URL Itself
+	msg_to_send.workTime = URLandWorkTime[1];					//How long to sit and wait on page == work time.
+
+	// Prepare message for sending:
+	msgStr = JSON.stringify(msg_to_send);
+	
+	return msgStr;
+};
+
+var printCounters = function (counters) {
+	logger.info("Counters:\n" + util.inspect(counters, {color: true, showHidden: true, depth: null }))
 };
 
 // ----------------------------
@@ -247,9 +293,9 @@ start()
 	// Random Test:
 	if (cdxgc_gen_args.doRandomTest) {
 		for (var i=0;i<100;i++) {
-			logger.debug("-->Pick "+ i +": Start");
+			logger.info("-->Pick "+ i +": Start");
 			var URLandWorkTime = getURLandWorkTime(URL_LIST);
-			logger.info("URL,WorkTime: " + URLandWorkTime);
+			logger.debug("URL,WorkTime: " + URLandWorkTime);
 
 			//Task ID:
 			var currentTaskID = getTaskID(URLandWorkTime);
@@ -264,55 +310,47 @@ start()
 .then(function () {
 	
 	// Connect AMQP:
-	//var amqpServer = amqp.connect('amqps://' + cdxgc_gen_args.amqp, AMQP_OPTS);
-	var amqpServer = amqp.connect('amqp://localhost:5672');
+	var amqpServer = amqp.connect('amqps://' + cdxgc_gen_args.amqp + ':5671', AMQP_OPTS);
+	//var amqpServer = amqp.connect('amqp://localhost:5672');
+	//var amqpServer = amqp.connect('amqps://cdxgcserver:5671', AMQP_OPTS);
 	//console.log(util.inspect(amqpServer, {color: true, showHidden: true, depth: null }));
 	
 	amqpServer.then(function (amqpConn) {
 		// Setup signals:
 		process.on('SIGINT', function () {
 			logger.info('SIGNAL: SIGINT caught: Closing connection.');
-			clearInterval(cycleTimer);
+			clearInterval(CYCLE_TIMER);
 			amqpConn.close();
+			printCounters(COUNTERS);
 		});
 		process.on('SIGTERM', function () {
 			logger.info('SIGNAL: SIGTERM caught: Closing connection.');
-			clearInterval(cycleTimer);
+			clearInterval(CYCLE_TIMER);
 			amqpConn.close();
+			printCounters(COUNTERS);
 		});
 		
 		return amqpConn.createChannel().then(function(ch) {
 			var ok = ch.assertExchange(AMQP_EXCHANGE, 'topic', {durable: false});
 			return ok.then(function() {
-				var counter = 0;
-				cycleTimer = setInterval(function () {
+				CYCLE_TIMER = setInterval(function () {
 			
-					var currentKey = getRoutingKey("all");
-					logger.info("Routing Key: " + currentKey);
-					// Pick URL and Work Time:
-					logger.debug("-->Pick "+ counter +": Start");
-					var URLandWorkTime = getURLandWorkTime(URL_LIST);
-					logger.info("URL,WorkTime: " + URLandWorkTime);
+					var taskStr = getTasking(URL_LIST, "execute_url");
+					if (!_.isNull(taskStr)) {
+						var currentKey = getRoutingKey("all");
+						logger.info("Routing Key: " + currentKey);
 
-					//Task ID:
-					var currentTaskID = getTaskID(URLandWorkTime);
-					logger.info("Task ID: " + currentTaskID);
-			
-					// Put message together:
-					var msg_to_send = {};
-					msg_to_send.taskid = currentTaskID;
-					msg_to_send.urlNum = URL_LIST[URLandWorkTime[0]].Rank;
-					msg_to_send.url = URL_LIST[URLandWorkTime[0]].URL;
-					msg_to_send.workTime = URLandWorkTime[1];
-			
-					// Prepare message for sending:
-					var msgStr = JSON.stringify(msg_to_send);
-					ch.publish(AMQP_EXCHANGE, currentKey, new Buffer(msgStr));
-					logger.info("Sent %s:'%s'", currentKey, msgStr);
+						// Pick URL and Work Time:
+						logger.info("-->Pick "+ COUNTERS.execute_url_cnt +": Start");
+						ch.publish(AMQP_EXCHANGE, currentKey, new Buffer(taskStr));
+						logger.info("Sent %s:'%s'", currentKey, taskStr);
+						
+						//Update Counter:
+						logger.info("-->Pick "+ COUNTERS.execute_url_cnt +": Stop");
+					} else {
+						logger.warn("Problem creating task.");
+					}
 					
-					//Update Counter:
-					logger.debug("-->Pick "+ counter +": Stop");
-					counter++;
 				},cdxgc_gen_args.cycleTime);
 		
 				// ch.publish(ex, key, new Buffer(message));
@@ -321,12 +359,8 @@ start()
 			});
 		});
 		
-	}).then(null,logger.error);
-	
-	// Set up message generation cycle time:
-	//return when().ensure(function() { amqpConn.close(); })	
+	}).then(null,function (err) {
+		logger.error("AMQP Error :: "+ err);
+	});
 });
-//.then(null,logger.error("Connection to AMQP Server failed."));
-
-
 
