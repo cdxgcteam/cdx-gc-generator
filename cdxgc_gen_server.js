@@ -17,8 +17,12 @@ var util = require('util');
 var fs = require('fs');
 var crypto = require('crypto');
 var os = require('os');
+
 // - Underscore
 var _ = require('underscore');
+
+// - Commander (Command Line Utility)
+var cdxgc_gen_args = require("commander");
 
 // - Random number generators:
 var randgen = require('random-seed');
@@ -28,11 +32,14 @@ var well = new wellprng();
 
 // - AMQP -> RabbitMQ Connection Library
 var amqp = require('amqplib');
+
 // - CSV
 var csvparser = require('csv');
+
 // - Promises...
 var when = require('when');
 //var q = require('q');
+
 // - Logging
 var winston = require('winston');
 var logger = new (winston.Logger)({
@@ -45,8 +52,6 @@ var logger = new (winston.Logger)({
 	// 	new winston.transports.File({ filename: 'exceptions.log' })
 	// ]
  });
-// - Commander (Command Line Utility)
-var cdxgc_gen_args = require("commander");
 
 // ----------------------------
 // GLOBALS:
