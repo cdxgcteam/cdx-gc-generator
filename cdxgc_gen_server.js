@@ -30,8 +30,13 @@ var mainrand = null;
 var wellprng = require('well-rng');
 var well = new wellprng();
 
+// - Redis -> Redis Driver/Adapter
+var redis = require("redis");
+var redisclient = null;
+
 // - AMQP -> RabbitMQ Connection Library
 var amqp = require('amqplib');
+var coreChannel = null;
 
 // - CSV
 var csvparser = require('csv');
@@ -58,15 +63,18 @@ var logger = new (winston.Logger)({
 // ----------------------------
 var SOURCE_SYSTEM_NAME = "cdxgenerator";
 var AMQP_EXCHANGE = "topic_cdxtasks";
-var AMQP_BASE_PATH = "/home/cdxgcserver/cdx_gc_certs2";
+var BASE_CERT_PATH = "/home/cdxgcserver/cdx_gc_certs2";
 var AMQP_OPTS = {
-  cert: fs.readFileSync(AMQP_BASE_PATH + '/generator/cert.pem'),
-  key: fs.readFileSync(AMQP_BASE_PATH + '/generator/key.pem'),
-  // cert and key or
-  // pfx: fs.readFileSync('../etc/client/keycert.p12'),
-  //passphrase: 'kJppRZYkdm4Fc5xr',
-  ca: [fs.readFileSync(AMQP_BASE_PATH + '/rmqca/cacert.pem')]
+	cert: fs.readFileSync(BASE_CERT_PATH + '/generator/cert.pem'),
+	key: fs.readFileSync(BASE_CERT_PATH + '/generator/key.pem'),
+	// cert and key or
+	// pfx: fs.readFileSync('../etc/client/keycert.p12'),
+	//passphrase: 'kJppRZYkdm4Fc5xr',
+	ca: [fs.readFileSync(BASE_CERT_PATH + '/rmqca/cacert.pem')]
 };
+var AMQP_PORT = 5671;
+var REDIS_PORT = 6379;
+var REDIS_HOST = "127.0.0.1";
 
 var POSSIBLE_LARGE_SEEDS = [
 '80Ez$1q{t/<obTqS!.(bNpW%%jZE{,v~zBtachaB$axT4Y*;,~Q2XfK_O@x5lr1<F%;nK@CxChsB*;9sGA3g(xlZ4d|K%4n9oxGYQzcp0_z$6]A8qk,hH33(c%!AqpxxQ<Em%oZSp{xBNS2u3z(PO]x=/-KQ$R()%h_R5eaV%EMUsoVg^3Y?xqUV6{%c0ea>]k@dJ8W},E~i7H]n3cOHg$)aS%:K.Z$ar$I-ii4eHlVS&YWsZA[O639arx_FLuvz',
@@ -93,13 +101,20 @@ var COUNTERS = {
 	execute_url_cnt: 0,
 	pause_cnt: 0,
 };
+var REDIS_CMD_SUBSCRIPTION = "redis_cmd_sub";
+var REDIS_MAL_SUBSCRIPTION = "redis_mal_sub";
+var MAL_TASK_QUEUE = new Array();
+
 // ----------------------------
 // Commander:
 // ----------------------------
 
 cdxgc_gen_args
 	.version(version)
-	.option('-a, --amqp <server name or IP>', 'AMQP Server', os.hostname())
+	.option('-ah, --amqp_host <server name or IP>', 'AMQP Server Host', os.hostname())
+	.option('-ap, --amqp_port <port number>', 'AMQP Server Port', AMQP_PORT)
+	.option('-rh, --redis_host <server name or IP>', 'Redis Server Host', REDIS_HOST)
+	.option('-rp, --redis_port <port number>', 'Redis Server Port', REDIS_PORT)
 	.option('-i, --inputFile <file>', 'Input file of URL\'s available to send')
 	.option('-u, --urlPreface <format>', 'Add URL Preface', URL_PREFACE)
 	.option('-c, --csvFormat <format>', 'Specify CSV Header Format')
@@ -110,7 +125,7 @@ cdxgc_gen_args
 	.parse(process.argv);
 
 // ----------------------------
-// Functions:
+// Core Functions:
 // ----------------------------
 
 var start = function() {
@@ -145,7 +160,10 @@ var start = function() {
 		process.exit(1); // May need to kick out.
 	}
 	
-	logger.info("AMQP Server: " + cdxgc_gen_args.amqp);
+	logger.info("AMQP Server: " + cdxgc_gen_args.amqp_host);
+	logger.info("AMQP Port: " + cdxgc_gen_args.amqp_port);
+	logger.info("Redis Server: " + cdxgc_gen_args.redis_host);
+	logger.info("Redis Port: " + cdxgc_gen_args.redis_port);
 	logger.debug("Input File Path: " + cdxgc_gen_args.inputFile);
 	logger.debug("URL Preface: " + cdxgc_gen_args.urlPreface);
 	logger.debug("CSV Format: " + cdxgc_gen_args.csvFormat);
@@ -155,6 +173,14 @@ var start = function() {
 
 	// Resolver:
 	deferred.resolve(cdxgc_gen_args.inputFile);
+	
+	// Redis Setup:
+	redisclient = redis.createClient(cdxgc_gen_args.redis_port, cdxgc_gen_args.redis_host);
+    redisclient.on("error", function (err) {
+        logger.error("Redis Error :: " + err);
+    });
+	redisclient.on("message", redisCmdRecieve);
+	redisclient.subscribe(REDIS_CMD_SUBSCRIPTION);
 	
 	return deferred.promise;
 };
@@ -192,6 +218,35 @@ var csvparse = function(inputFile) { // CSV Pars
 		
 	return deferred.promise;
 };
+
+var redisCmdRecieve = function (channel, message) {
+	logger.debug("redisCmdRecieve :: channel: " + channel + " :: msg: " + message);
+};
+
+var mainTaskExecutor = function () {
+
+	var taskStr = getTasking(URL_LIST, "execute_url");
+	if (!_.isNull(taskStr)) {
+		var currentKey = getRoutingKey("all");
+		logger.info("Routing Key: " + currentKey);
+
+		// Pick URL and Work Time:
+		//logger.info("-->Pick "+ COUNTERS.execute_url_cnt +": Start");
+		coreChannel.publish(AMQP_EXCHANGE, currentKey, new Buffer(taskStr));
+		logger.info("Sent %s:'%s'", currentKey, taskStr);
+		
+		//Update Counter:
+		//logger.info("-->Pick "+ COUNTERS.execute_url_cnt +": Stop");
+	} else {
+		logger.warn("Problem creating task.");
+	}
+	
+};
+
+
+// ----------------------------
+// Utils:
+// ----------------------------
 
 var getURLandWorkTime = function(inputList) {
 	
@@ -248,12 +303,12 @@ var getTasking = function (urlListArray, commandStr) {
 	}
 	
 	var URLandWorkTime = getURLandWorkTime(urlListArray);
-	logger.debug("getTasking :: URL,WorkTime: " + URLandWorkTime);
+	logger.info("getTasking :: URL,WorkTime: " + URLandWorkTime);
 
 	//Task ID:
 	var currentTaskIDInfo = getTaskID(URLandWorkTime);
-	logger.debug("getTasking :: Task Creation Date: " + currentTaskIDInfo[0]);
-	logger.debug("getTasking :: Task ID: " + currentTaskIDInfo[1]);
+	logger.info("getTasking :: Task Creation Date: " + currentTaskIDInfo[0]);
+	logger.info("getTasking :: Task ID: " + currentTaskIDInfo[1]);
 
 	// Put message together:
 	var msg_to_send = {};
@@ -315,10 +370,11 @@ start()
 .then(function () {
 	
 	// Connect AMQP:
-	var amqpServer = amqp.connect('amqps://' + cdxgc_gen_args.amqp + ':5671', AMQP_OPTS);
+	var amqpServer = amqp.connect('amqps://' + cdxgc_gen_args.amqp_host + ':' + cdxgc_gen_args.amqp_port, AMQP_OPTS);
 	//var amqpServer = amqp.connect('amqp://localhost:5672');
 	//var amqpServer = amqp.connect('amqps://cdxgcserver:5671', AMQP_OPTS);
 	//console.log(util.inspect(amqpServer, {color: true, showHidden: true, depth: null }));
+	
 	
 	amqpServer.then(function (amqpConn) {
 		// Setup signals:
@@ -327,37 +383,40 @@ start()
 			clearInterval(CYCLE_TIMER);
 			amqpConn.close();
 			printCounters(COUNTERS);
+			process.exit(1); // May need to kick out.
 		});
 		process.on('SIGTERM', function () {
 			logger.info('SIGNAL: SIGTERM caught: Closing connection.');
 			clearInterval(CYCLE_TIMER);
 			amqpConn.close();
 			printCounters(COUNTERS);
+			process.exit(1); // May need to kick out.
 		});
 		
 		return amqpConn.createChannel().then(function(ch) {
+			coreChannel = ch;
 			var ok = ch.assertExchange(AMQP_EXCHANGE, 'topic', {durable: false});
 			return ok.then(function() {
-				CYCLE_TIMER = setInterval(function () {
-			
-					var taskStr = getTasking(URL_LIST, "execute_url");
-					if (!_.isNull(taskStr)) {
-						var currentKey = getRoutingKey("all");
-						logger.info("Routing Key: " + currentKey);
-
-						// Pick URL and Work Time:
-						logger.info("-->Pick "+ COUNTERS.execute_url_cnt +": Start");
-						ch.publish(AMQP_EXCHANGE, currentKey, new Buffer(taskStr));
-						logger.info("Sent %s:'%s'", currentKey, taskStr);
-						
-						//Update Counter:
-						logger.info("-->Pick "+ COUNTERS.execute_url_cnt +": Stop");
-					} else {
-						logger.warn("Problem creating task.");
-					}
-					
-				},cdxgc_gen_args.cycleTime);
-		
+				// CYCLE_TIMER = setInterval(function () {
+// 			
+// 					var taskStr = getTasking(URL_LIST, "execute_url");
+// 					if (!_.isNull(taskStr)) {
+// 						var currentKey = getRoutingKey("all");
+// 						logger.info("Routing Key: " + currentKey);
+// 
+// 						// Pick URL and Work Time:
+// 						logger.info("-->Pick "+ COUNTERS.execute_url_cnt +": Start");
+// 						ch.publish(AMQP_EXCHANGE, currentKey, new Buffer(taskStr));
+// 						logger.info("Sent %s:'%s'", currentKey, taskStr);
+// 						
+// 						//Update Counter:
+// 						logger.info("-->Pick "+ COUNTERS.execute_url_cnt +": Stop");
+// 					} else {
+// 						logger.warn("Problem creating task.");
+// 					}
+// 					
+// 				},cdxgc_gen_args.cycleTime);
+				CYCLE_TIMER = setInterval(mainTaskExecutor,cdxgc_gen_args.cycleTime);
 				// ch.publish(ex, key, new Buffer(message));
 				// console.log(" [x] Sent %s:'%s'", key, message);
 				// return ch.close();

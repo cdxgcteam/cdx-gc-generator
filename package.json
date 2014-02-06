@@ -19,20 +19,21 @@
 	"colors": "0.6.x",
 	"winston": "0.7.x",
 	"csv": "0.3.x",
-    
+    "hiredis": "0.1.16",
+	"redis": "0.10.x",
 	"amqplib": "0.1.x",
     
 	"q": "0.9.7",
 	"when": "~2.1",
 	
-    "random-seed": "git+https://github.com/skratchdot/random-seed.git",
+	"random-seed": "git+https://github.com/skratchdot/random-seed.git",
 	"well-rng": "1.0.x"
   },
   "scripts": {
     "start": "node ./cdxgc_gen_server.js"
   },
   "keywords": [
-	  "",
+	  "Cyber Defense Exercise",
 	  "CDX",
 	  "GreyCell",
 	  "GreyCell Generator"
