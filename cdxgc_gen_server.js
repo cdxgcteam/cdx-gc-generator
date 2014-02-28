@@ -32,6 +32,7 @@ var well = new wellprng();
 
 // - Redis -> Redis Driver/Adapter
 var redis = require("redis");
+var redisclient_msg = null;
 var redisclient = null;
 
 // - AMQP -> RabbitMQ Connection Library
@@ -101,6 +102,10 @@ var COUNTERS = {
 	execute_url_cnt: 0,
 	pause_cnt: 0,
 };
+var REDIS_SENT_HEADER = "sent_meta_";
+var REDIS_SENT_ORDER_KEY = "cdx_sent_order";
+var REDIS_MAL_HEADER = "mal_meta_";
+var REDIS_MAL_ORDER_KEY = "cdx_sent_order";
 var REDIS_CMD_SUBSCRIPTION = "redis_cmd_sub";
 var REDIS_MAL_SUBSCRIPTION = "redis_mal_sub";
 var MAL_TASK_QUEUE = new Array();
@@ -176,11 +181,18 @@ var start = function() {
 	
 	// Redis Setup:
 	redisclient = redis.createClient(cdxgc_gen_args.redis_port, cdxgc_gen_args.redis_host);
-    redisclient.on("error", function (err) {
+	redisclient_msg = redis.createClient(cdxgc_gen_args.redis_port, cdxgc_gen_args.redis_host);
+	redisclient.on("ready", function() {
+		logger.info("Redis :: Main Redis Connection Ready.");
+	});
+	redisclient_msg.on("ready", function() {
+		logger.info("Redis :: Reciever Redis Connection Ready.");
+	});
+    redisclient_msg.on("error", function (err) {
         logger.error("Redis Error :: " + err);
     });
-	redisclient.on("message", redisCmdRecieve);
-	redisclient.subscribe(REDIS_CMD_SUBSCRIPTION);
+	redisclient_msg.on("message", redisCmdRecieve);
+	redisclient_msg.subscribe(REDIS_CMD_SUBSCRIPTION);
 	
 	return deferred.promise;
 };
@@ -225,15 +237,27 @@ var redisCmdRecieve = function (channel, message) {
 
 var mainTaskExecutor = function () {
 
-	var taskStr = getTasking(URL_LIST, "execute_url");
-	if (!_.isNull(taskStr)) {
+	var taskInfo = getTasking(URL_LIST, "execute_url");
+	if (!_.isNull(taskInfo)) {
 		var currentKey = getRoutingKey("all");
 		logger.info("Routing Key: " + currentKey);
 
 		// Pick URL and Work Time:
 		//logger.info("-->Pick "+ COUNTERS.execute_url_cnt +": Start");
-		coreChannel.publish(AMQP_EXCHANGE, currentKey, new Buffer(taskStr));
-		logger.info("Sent %s:'%s'", currentKey, taskStr);
+		var taskObj = taskInfo[1];
+		
+		// Add the info to Redis server:
+		var fullKey = REDIS_SENT_HEADER + taskObj.taskid;
+		logger.info("REDIS :: Sent Key: " + fullKey);
+		redisclient.hmset(fullKey, taskObj);
+		logger.info("REDIS :: Put in sort order: " + fullKey + " :: Time(ms): " + taskObj.taskCreateMS);
+		redisclient.hmset(fullKey, taskObj);
+		
+		// Set in sent key order:
+		redisclient.zadd(REDIS_SENT_ORDER_KEY, taskObj.taskCreateMS, fullKey);
+		
+		coreChannel.publish(AMQP_EXCHANGE, currentKey, new Buffer(taskInfo[0]));
+		logger.info("Sent %s:'%s'", currentKey, taskInfo[0]);
 		
 		//Update Counter:
 		//logger.info("-->Pick "+ COUNTERS.execute_url_cnt +": Stop");
@@ -273,7 +297,7 @@ var getTaskID = function(workArray) {
 	logger.debug("getTaskID :: TaskID Input: " + currentDigest);
 	logger.debug("getTaskID :: TaskID SHA1: " + hashout);
 	
-	return new Array(currentDate.toJSON(), hashout);
+	return new Array(currentDate.toJSON(), hashout, currentDate.getTime());
 };
 
 var getRoutingKey = function (school, secondaryPath) {
@@ -315,6 +339,7 @@ var getTasking = function (urlListArray, commandStr) {
 	msg_to_send.srcSystem = SOURCE_SYSTEM_NAME;					//Source System Generator
 	msg_to_send.cmd = COMMANDS_AVAILABLE[choosenCommand];		//Choosen Command
 	msg_to_send.taskCreateDate = currentTaskIDInfo[0];			//Task Creation Date/Time
+	msg_to_send.taskCreateMS = currentTaskIDInfo[2];			//Task Creation Date/Time in Milliseconds.
 	msg_to_send.taskid = currentTaskIDInfo[1];					//Task ID
 	msg_to_send.urlNum = urlListArray[URLandWorkTime[0]].Rank;	//URL Number/Rank
 	msg_to_send.url = urlListArray[URLandWorkTime[0]].URL;		//URL Itself
@@ -323,7 +348,7 @@ var getTasking = function (urlListArray, commandStr) {
 	// Prepare message for sending:
 	msgStr = JSON.stringify(msg_to_send);
 	
-	return msgStr;
+	return new Array(msgStr, msg_to_send);
 };
 
 var printCounters = function (counters) {
