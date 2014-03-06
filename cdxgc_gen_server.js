@@ -337,12 +337,14 @@ var getTasking = function (urlListArray, commandStr) {
 	// Put message together:
 	var msg_to_send = {};
 	msg_to_send.srcSystem = SOURCE_SYSTEM_NAME;					//Source System Generator
+	msg_to_send.poc = SOURCE_SYSTEM_NAME;						//POC == Source System Generator
 	msg_to_send.cmd = COMMANDS_AVAILABLE[choosenCommand];		//Choosen Command
 	msg_to_send.taskCreateDate = currentTaskIDInfo[0];			//Task Creation Date/Time
 	msg_to_send.taskCreateMS = currentTaskIDInfo[2];			//Task Creation Date/Time in Milliseconds.
 	msg_to_send.taskid = currentTaskIDInfo[1];					//Task ID
 	msg_to_send.urlNum = urlListArray[URLandWorkTime[0]].Rank;	//URL Number/Rank
 	msg_to_send.url = urlListArray[URLandWorkTime[0]].URL;		//URL Itself
+	msg_to_send.minWorkTime = cdxgc_gen_args.minTime;			//Min Work Time in MS
 	msg_to_send.workTime = URLandWorkTime[1];					//How long to sit and wait on page == work time.
 
 	// Prepare message for sending:
