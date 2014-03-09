@@ -322,7 +322,7 @@ var getTasking = function (urlListArray, commandStr) {
 	
 	var choosenCommand = _.indexOf(COMMANDS_AVAILABLE,commandStr);
 	if (choosenCommand == -1) {
-		logger.warn('Invalid Command Specified: '+commandStr+' :: This shouldn't happen...');
+		logger.warn('Invalid Command Specified: '+commandStr+' :: This shouldn\'t happen...');
 		return msgStr;
 	}
 	
