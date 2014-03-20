@@ -18,8 +18,9 @@ var fs = require('fs');
 var crypto = require('crypto');
 var os = require('os');
 
-// - Underscore
-var _ = require('underscore');
+// - Underscore/Lodash
+//var _ = require('underscore');
+var _ = require('lodash-node');
 
 // - Commander (Command Line Utility)
 var cdxgc_gen_args = require('commander');
@@ -106,9 +107,16 @@ var REDIS_SENT_HEADER = 'sent_meta_';
 var REDIS_SENT_ORDER_KEY = 'cdx_sent_order';
 var REDIS_MAL_HEADER = 'mal_meta_';
 var REDIS_MAL_ORDER_KEY = 'cdx_mal_order';
-var REDIS_CMD_SUBSCRIPTION = 'redis_cmd_sub';
-var REDIS_MAL_SUBSCRIPTION = 'redis_mal_sub';
-var MAL_TASK_QUEUE = new Array();
+
+// var REDIS_CMD_SUBSCRIPTION = 'redis_cmd_sub';
+// var REDIS_MAL_SUBSCRIPTION = 'redis_mal_sub';
+
+var REDIS_MAL_QUEUE_KEY = 'cdx_mal_submits_queue';
+var REDIS_CMD_QUEUE_KEY = 'cdx_cmd_submits_queue';
+var REDIS_MAL_LOCK_KEY = 'cdx_mal_lock_key';
+var REDIS_CMD_LOCK_KEY = 'cdx_cmd_lock_key';
+
+//var MAL_TASK_QUEUE = new Array();
 
 // ----------------------------
 // Commander:
@@ -181,18 +189,17 @@ var start = function() {
 	
 	// Redis Setup:
 	redisclient = redis.createClient(cdxgc_gen_args.redis_port, cdxgc_gen_args.redis_host);
-	redisclient_msg = redis.createClient(cdxgc_gen_args.redis_port, cdxgc_gen_args.redis_host);
 	redisclient.on('ready', function() {
 		logger.info('Redis :: Main Redis Connection Ready.');
 	});
-	redisclient_msg.on('ready', function() {
-		logger.info('Redis :: Reciever Redis Connection Ready.');
-	});
-    redisclient_msg.on('error', function (err) {
+    redisclient.on('error', function (err) {
         logger.error('Redis Error :: ' + err);
     });
-	redisclient_msg.on('message', redisCmdRecieve);
-	redisclient_msg.subscribe(REDIS_CMD_SUBSCRIPTION);
+	// redisclient_msg.on('ready', function() {
+	// 	logger.info('Redis :: Reciever Redis Connection Ready.');
+	// });
+	// redisclient_msg.on('message', redisCmdRecieve);
+	// redisclient_msg.subscribe(REDIS_CMD_SUBSCRIPTION);
 	
 	return deferred.promise;
 };
@@ -271,6 +278,84 @@ var mainTaskExecutor = function () {
 // ----------------------------
 // Utils:
 // ----------------------------
+
+var redisLock = {
+	lockKeyHash: null,
+	intervalCounter: 0,
+	intervalObj: null,
+	
+	// lockKey : Redis Key to lock against
+	// maxTime : In milliseconds, the expire time for the key
+	setLock: function (lockKey, maxTime, maxRetries, maxTimeBetweenTries) {
+		logger.debug('redisLock :: setLock :: lockKey: '+lockKey+' maxTime: '+maxTime+' maxRetries: '+maxRetries+' maxTimeBetweenTries: ', maxTimeBetweenTries);
+
+		// Setup promise:
+		var lockDefer = when.defer();
+		var lockDeferRes = lockDefer.resolver;
+		
+		// Build lock string:
+		var currentDate = new Date();
+		var currentDigest = currentDate.toJSON() + POSSIBLE_LARGE_SEEDS[CHOOSEN_SEED];
+		var shasum = crypto.createHash('sha1');
+		shasum.update(currentDigest, 'utf8');
+		var hashout = shasum.digest('hex');
+		
+		// Build set command:
+		var curMaxRetries = maxRetries || 5;
+		var curMaxTimeBetweenTries = maxTimeBetweenTries || 50;
+		var setArgs = [lockKey, hashout, 'PX', maxTime, 'NX'];
+		logger.debug('redisLock :: setLock :: Max Retries: '+curMaxRetries+' Max Time Between Tries: '+curMaxTimeBetweenTries);
+		logger.debug('redisLock :: setLock :: Set Command Input: '+util.inspect(setArgs));
+		redisLock.intervalObj = setInterval(function () {
+			redisclient.set(setArgs, function (err, reply) {
+				logger.debug('redisLock :: setLock :: Reply: '+reply+' Err: '+err);
+				if(reply === 'OK') {
+					redisLock.lockKeyHash = hashout;
+					lockDeferRes.resolve(hashout);
+					clearInterval(redisLock.intervalObj);
+				} else {
+					redisLock.intervalCounter++;
+					if(redisLock.intervalCounter == curMaxRetries) {
+						clearInterval(redisLock.intervalObj);
+						lockDeferRes.reject('lockFail');
+					}
+				}
+			});
+		}, curMaxTimeBetweenTries);
+		
+		return lockDefer.promise;
+	},
+	releaseLock: function (lockKey, lockHash) {
+		logger.debug('redisLock :: releaseLock :: lockKey: '+lockKey+' lockHash: '+lockHash);
+		// release lock Script:
+		var releaseLuaCode = 'if redis.call("get",KEYS[1]) == ARGV[1]\nthen\n    return redis.call("del",KEYS[1])\nelse\n    return 0\nend';
+		
+		// release lock defer:
+		var lockDefer = when.defer();
+		var lockDeferRes = lockDefer.resolver;
+		
+		// Use the hash provided unless one isn't and then take what we have on file in the object:
+		var curLockHash = null;
+		if (_.isUndefined(lockHash)) {
+			curLockHash = redisLock.lockKeyHash;
+		} else {
+			curLockHash = lockHash;
+		}
+		var evalArgs = [releaseLuaCode, 1, lockKey, curLockHash];
+		logger.debug('redisLock :: releaseLock :: Eval Command Input: '+util.inspect(evalArgs));
+		redisclient.eval(evalArgs, function (err, reply) {
+			logger.debug('redisLock :: releaseLock :: Reply: '+reply+' Err: '+err);
+			if (reply == 1){
+				logger.debug('redisLock :: releaseLock :: released!');
+				lockDeferRes.resolve(reply);
+			} else {
+				logger.debug('redisLock :: releaseLock :: failed!');
+				lockDeferRes.reject(err);
+			}
+		});
+		return lockDefer.promise;
+	}
+};
 
 var getURLandWorkTime = function(inputList) {
 	
