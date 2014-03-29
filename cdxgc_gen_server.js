@@ -201,12 +201,7 @@ var start = function() {
     redisclient.on('error', function (err) {
         logger.error('Redis Error :: ' + err);
     });
-	// redisclient_msg.on('ready', function() {
-	// 	logger.info('Redis :: Reciever Redis Connection Ready.');
-	// });
-	// redisclient_msg.on('message', redisCmdRecieve);
-	// redisclient_msg.subscribe(REDIS_CMD_SUBSCRIPTION);
-	
+
 	return deferred.promise;
 };
 
@@ -243,10 +238,6 @@ var csvparse = function(inputFile) { // CSV Pars
 		
 	return deferred.promise;
 };
-
-// var redisCmdRecieve = function (channel, message) {
-// 	logger.debug('redisCmdRecieve :: channel: ' + channel + ' :: msg: ' + message);
-// };
 
 var mainTaskExecutor = function () {
 	// Step 1; See if there is a general command:
