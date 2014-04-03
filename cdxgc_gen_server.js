@@ -103,20 +103,22 @@ var POSSIBLE_LARGE_SEEDS = [
 'xre{}K$O#Z~o$wel68ZU/ow?!y-erZS&&um%fI%aHyTk](UVZIxgwcQ/(b/sviXA5wQ5A8rL-I#lS4b)1V}xhw7%{8h3xs$4P_Pc)Wp<WCyhp<TxjGPY<[eJ8;:7UAxC/g$Q5kVEwV551IX*~qBXuxcQ5gKx1(LOJa~8O)aYMYOE,TgI;(D!i[0~_ohr{@~b[WzC[R;bK4A9~l5}E%@opa{]S1-Z+reMnksvK3](o_uqb3/]x%XLz~c>2&RNm{-,mx'
 ];
 var CHOOSEN_SEED = 0;
-var UNDERGRAD_SCHOOLS = ['all','navy', 'marines', 'army', 'airforce', 'coastguard', 'nps', 'rmc'];
+var SCHOOLS = ['all','navy', 'marines', 'army', 'airforce', 'coastguard', 'nps', 'rmc'];
 var COMMANDS_AVAILABLE = ['execute_url','pause', 'quit'];
-var GRAD_SCHOOLS = ['nps'];
 var MIN_TIME = 200; // in milliseconds
 //var MAX_TIME_MIN = 5; // 5 minutes
 //var MAX_TIME = 300000; // 5 mins = 300000 milliseconds
-var MAX_TIME_MIN = 3; // 3 minutes
+//var MAX_TIME_MIN = 3; // 3 minutes
+var MAX_TIME_MIN = 1; // 3 minutes
 var MAX_TIME = MAX_TIME_MIN*1000*60; // 3 mins = 180000 milliseconds
 //var TASK_GEN_CYCLE_TIME = 500; // in milliseconds == .5 seconds
-var TASK_GEN_CYCLE_TIME = 30000; // in milliseconds == 30 seconds
+//var TASK_GEN_CYCLE_TIME = 30000; // in milliseconds == 30 seconds
+var TASK_GEN_CYCLE_TIME = 60000; // in milliseconds == 1 minute
 var MAL_MAX_THRESHOLD = 100;
 var MAL_DEFAULT_THRESHOLD = 30;
 var URL_PREFACE = 'http://';
 var URL_LIST = [];
+var QUIT_TIMEOUT = 30000; // 30 seconds.
 var CYCLE_TIMER = null;
 var COUNTERS = {
 	execute_url_cnt: 0,
@@ -249,8 +251,27 @@ var mainTaskExecutor = function () {
 			
 			//Execute Command:
 			var genCmdWorkObj = generateTasking(genCmd, genCmd.cmd);
-			submitWork(REDIS_SENT_HEADER, genCmdWorkObj, 'all', 'task');
-		
+			submitWork(REDIS_SENT_HEADER, genCmdWorkObj, 'all');
+			
+			// Handle the two basic commands to prevent overloading the RabbitMQ Server:
+			if (genCmdWorkObj.cmd === 'pause') {
+				logger.info('mainTaskExecutor :: Pause Mode Sent...Cancelling Interval');
+				clearInterval(CYCLE_TIMER);
+				logger.info('mainTaskExecutor :: Setting Internal Pause Timeout.');
+				var pauseTime = genCmdWorkObj.workTime;
+				setTimeout(function () {
+					logger.info('mainTaskExecutor :: Restarting generator main interval.');
+					CYCLE_TIMER = setInterval(mainTaskExecutor,cdxgc_gen_args.cycleTime);
+				}, genCmdWorkObj.workTime);
+			} else if (genCmdWorkObj.cmd === 'quit') {
+				// Using a signal so the connection to AMQP and other things are done properly.
+				logger.info('mainTaskExecutor :: Quiting in '+QUIT_TIMEOUT+'ms.');
+				clearInterval(CYCLE_TIMER);
+				setTimeout(function () {
+					logger.info('mainTaskExecutor :: Quiting generation...Exiting...');
+					process.kill(process.pid, 'SIGTERM');
+				}, QUIT_TIMEOUT);
+			}
 		} else {
 			//Step 2: Check to see if there is task available.
 			//Step 3: If there is a task set then choose a random number from 0 to 100.
@@ -264,7 +285,7 @@ var mainTaskExecutor = function () {
 
 					//Execute Command:
 					var malCmdWorkObj = generateTasking(malCmd, 'execute_url');
-					submitWork(REDIS_MAL_HEADER, malCmdWorkObj, 'all', 'task');
+					submitWork(REDIS_MAL_HEADER, malCmdWorkObj, 'all');
 				} else {
 					logger.info('mainTaskExecutor :: Random Command...');
 			
@@ -272,7 +293,7 @@ var mainTaskExecutor = function () {
 					randomWork.url = getRandomURL(URL_LIST);
 					var randCmdWorkObj = generateTasking(randomWork, 'execute_url');
 					logger.info('mainTaskExecutor :: randomWork :\n' + util.inspect(randCmdWorkObj));
-					submitWork(REDIS_SENT_HEADER, randCmdWorkObj, 'all', 'task');
+					submitWork(REDIS_SENT_HEADER, randCmdWorkObj, 'all');
 				}
 			});
 		}
@@ -404,7 +425,8 @@ var getMalCommand = function (threshold) {
 				
 					popedObj = JSON.parse(popedInfo.replyStr);
 					logger.debug('PopedObj: '+util.inspect(popedObj));
-				
+					popedObj.taskType = 'malicious';
+					
 					// Release the lock:
 					redisLock.releaseLock(curLockKey,popedInfo.lock);
 					return popedObj;
@@ -455,6 +477,9 @@ var getGeneralCommand = function () {
 				
 				popedObj = JSON.parse(popedInfo.replyStr);
 				logger.debug('PopedObj: '+util.inspect(popedObj));
+				// Clean Up and Add task Type:
+				popedObj.cmd = popedObj.cmd.toLowerCase();
+				popedObj.taskType = 'general';
 				
 				// Release the lock:
 				redisLock.releaseLock(curLockKey,popedInfo.lock);
@@ -468,13 +493,6 @@ var getGeneralCommand = function () {
 };
 
 var submitWork = function(taskType, taskObj, school, secondaryPath) {
-	// NOTE: taskType == Redis Header.
-	var curOrderKey = null;
-	if (taskType == REDIS_SENT_HEADER) {
-		curOrderKey = REDIS_SENT_ORDER_KEY;
-	} else if (taskType == REDIS_MAL_HEADER) {
-		curOrderKey = REDIS_MAL_ORDER_KEY;
-	}
 	
 	var currentKey = getRoutingKey(school, secondaryPath);
 	logger.info('Routing Key: ' + currentKey);
@@ -482,9 +500,10 @@ var submitWork = function(taskType, taskObj, school, secondaryPath) {
 	// Convert the taskObj to a string for submittal to clients.
 	var tarkObjStr = JSON.stringify(taskObj);
 	tarkObjStr = tarkObjStr.replace(/,\"poc\":\"\w+\",/gi, ",");
+	tarkObjStr = tarkObjStr.replace(/,\"taskType\":\"\w+\",/gi, ",");
 	
 	// Add the info to Redis server:
-	var fullKey = taskType + taskObj.taskid;
+	var fullKey = taskType + taskObj.taskID;
 	logger.info('submitWork :: Sent Key: ' + fullKey);
 	//var hmsetArgs = [fullKey, taskObj];
 	redisclient.hmset(fullKey, taskObj, function(err, reply) {
@@ -492,11 +511,27 @@ var submitWork = function(taskType, taskObj, school, secondaryPath) {
 	});
 	logger.info('submitWork :: Put in sort order: ' + fullKey + ' :: Time(ms): ' + taskObj.taskCreateMS);
 
+	// NOTE: taskType == Redis Header.
+	// var curOrderKey = null;
+	// if (taskType == REDIS_SENT_HEADER) {
+	// 	curOrderKey = REDIS_SENT_ORDER_KEY;
+	// } else
+	var zaddArgs = null;
+	if (taskType == REDIS_MAL_HEADER) {
+		//curOrderKey = REDIS_MAL_ORDER_KEY;
+		// Set in sent key order:
+		zaddArgs = [REDIS_MAL_ORDER_KEY, taskObj.taskCreateMS, fullKey];
+		logger.debug('submitWork :: zaddArgs :: malOrder :: '+util.inspect(zaddArgs));
+		redisclient.zadd([REDIS_MAL_ORDER_KEY, taskObj.taskCreateMS, fullKey], function (err, reply) {
+			logger.debug('submitWork :: zadd :: malOrder reply :: Err: '+err+' Reply: '+util.inspect(reply));
+		});
+	}
+
 	// Set in sent key order:
-	var zaddArgs = [curOrderKey, taskObj.taskCreateMS, fullKey];
-	logger.debug('submitWork :: zaddArgs :: '+util.inspect(zaddArgs));
-	redisclient.zadd(zaddArgs, function (err, reply) {
-		logger.debug('submitWork :: zadd :: Err: '+err+' Reply: '+util.inspect(reply));
+	zaddArgs = [REDIS_SENT_ORDER_KEY, taskObj.taskCreateMS, fullKey];
+	logger.debug('submitWork :: zaddArgs :: general sent order :: '+util.inspect(zaddArgs));
+	redisclient.zadd([REDIS_SENT_ORDER_KEY, taskObj.taskCreateMS, fullKey], function (err, reply) {
+		logger.debug('submitWork :: zadd :: general sent order reply :: Err: '+err+' Reply: '+util.inspect(reply));
 	});
 
 	coreChannel.publish(AMQP_EXCHANGE, currentKey, new Buffer(tarkObjStr));
@@ -578,9 +613,9 @@ var generateTaskID = function (taskObjStr) {
 
 var getRoutingKey = function (school, secondaryPath) {
 	var out = null;
-	var choosenSchool = _.indexOf(UNDERGRAD_SCHOOLS, school);
+	var choosenSchool = _.indexOf(SCHOOLS, school);
 	if ( choosenSchool > -1) {
-		out = UNDERGRAD_SCHOOLS[choosenSchool];
+		out = SCHOOLS[choosenSchool];
 		if (!_.isString(secondaryPath)) {
 			out += '.task';
 		} else {
@@ -639,11 +674,20 @@ var generateTasking = function(workObj, commandStr) {
 		msg_to_send.poc = workObj.poc;
 	}
 	
+	// Use Tasking Type:
+	msg_to_send.taskType = 'generated';
+	if (!_.isUndefined(workObj.taskType)) {
+		msg_to_send.taskType = workObj.taskType;
+	}
+	
+	msg_to_send.url = '';
+	if (workObj.url)
+	msg_to_send.url = workObj.url;								//URL Itself
+	
 	msg_to_send.cmd = COMMANDS_AVAILABLE[choosenCommand];		//Choosen Command
 	msg_to_send.taskCreateDate = taskIDObj.curDate;				//Task Creation Date/Time
 	msg_to_send.taskCreateMS = taskIDObj.curDateMS;				//Task Creation Date/Time in Milliseconds.
-	msg_to_send.taskid = taskIDObj.taskID;						//Task ID
-	msg_to_send.url = workObj.url;								//URL Itself
+	msg_to_send.taskID = taskIDObj.taskID;						//Task ID
 	msg_to_send.minWorkTime = curMinTime;						//Min Work Time in MS
 	msg_to_send.workTime = workTime;							//How long to sit and wait on page == work time.
 	
