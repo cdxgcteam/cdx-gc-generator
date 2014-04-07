@@ -52,8 +52,8 @@ var winston = require('winston');
 var logger = new (winston.Logger)({
 	exitOnError: false,
 	transports: [
-		new (winston.transports.Console)({level: 'debug', colorize: true, timestamp: true})//,
-		//new (winston.transports.File)({ filename: 'info.log' })
+		new (winston.transports.Console)({level: 'debug', colorize: true, timestamp: true}),
+		new (winston.transports.File)({level: 'debug', colorize: true, timestamp: true, filename: 'info.log' })
 	]//,
 	// exceptionHandlers: [
 	// 	new winston.transports.File({ filename: 'exceptions.log' })
